@@ -201,7 +201,7 @@ class BiometricDeviceDetails(models.Model):
                         atten_time = datetime.datetime.strptime(
                             utc_dt, "%Y-%m-%d %H:%M:%S"
                         )
-                        # atten_time = fields.Datetime.to_string(atten_time)
+
                         for uid in user:
                             if uid.user_id == each.user_id:
                                 get_user_id = self.env["hr.employee"].search(
@@ -215,84 +215,62 @@ class BiometricDeviceDetails(models.Model):
                                         ]
                                     )
                                     if not duplicate_atten_ids:
+                                        # Get the original punch type
+                                        original_punch = str(each.punch)
+                                        is_overtime_in = original_punch == "4"
+                                        is_overtime_out = original_punch == "5"
+
+                                        # Find the last attendance record for this employee
                                         last_attendance = hr_attendance.search(
                                             [("employee_id", "=", get_user_id.id)],
                                             order="check_in desc",
                                             limit=1,
                                         )
+
                                         if last_attendance:
                                             if not last_attendance.check_out:
                                                 # Last attendance is a check-in without check-out
-                                                if each.punch == 0:  # Check-in again
+                                                if (
+                                                    original_punch == "0"
+                                                    or is_overtime_in
+                                                ):
+                                                    # Handle as check-in again (close previous and open new)
                                                     last_attendance.write(
                                                         {"check_out": atten_time}
                                                     )
-                                                    zk_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "device_id_num": each.user_id,
-                                                            "attendance_type": str(
-                                                                each.status
-                                                            ),
-                                                            "punch_type": str(
-                                                                each.punch
-                                                            ),
-                                                            "punching_time": atten_time,
-                                                            "address_id": info.address_id.id,
-                                                        }
-                                                    )
-                                                    # Create a new check-in
                                                     hr_attendance.create(
                                                         {
                                                             "employee_id": get_user_id.id,
                                                             "check_in": atten_time,
-                                                        }
-                                                    )
-                                                elif each.punch == 1:  # Check-out
-                                                    last_attendance.write(
-                                                        {"check_out": atten_time}
-                                                    )
-                                                    zk_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "device_id_num": each.user_id,
-                                                            "attendance_type": str(
-                                                                each.status
-                                                            ),
-                                                            "punch_type": str(
-                                                                each.punch
-                                                            ),
-                                                            "punching_time": atten_time,
-                                                            "address_id": info.address_id.id,
-                                                        }
-                                                    )
-                                            else:
-                                                # Last attendance is a complete check-in/check-out pair
-                                                if each.punch == 0:  # Check-in
-                                                    hr_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "check_in": atten_time,
-                                                        }
-                                                    )
-                                                    zk_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "device_id_num": each.user_id,
-                                                            "attendance_type": str(
-                                                                each.status
-                                                            ),
-                                                            "punch_type": str(
-                                                                each.punch
-                                                            ),
-                                                            "punching_time": atten_time,
-                                                            "address_id": info.address_id.id,
                                                         }
                                                     )
                                                 elif (
-                                                    each.punch == 1
-                                                ):  # Check-out without prior check-in
-                                                    # Check if the last check-out was within 3 minutes
+                                                    original_punch == "1"
+                                                    or is_overtime_out
+                                                ):
+                                                    # Handle as check-out
+                                                    last_attendance.write(
+                                                        {"check_out": atten_time}
+                                                    )
+                                                # Handle other punch types (2,3) if needed
+                                            else:
+                                                # Last attendance is a complete check-in/check-out pair
+                                                if (
+                                                    original_punch == "0"
+                                                    or is_overtime_in
+                                                ):
+                                                    # Handle as check-in
+                                                    hr_attendance.create(
+                                                        {
+                                                            "employee_id": get_user_id.id,
+                                                            "check_in": atten_time,
+                                                        }
+                                                    )
+                                                elif (
+                                                    original_punch == "1"
+                                                    or is_overtime_out
+                                                ):
+                                                    # Check-out without prior check-in
                                                     time_diff = (
                                                         atten_time
                                                         - last_attendance.check_out
@@ -313,20 +291,6 @@ class BiometricDeviceDetails(models.Model):
                                                                 "check_in": atten_time,
                                                             }
                                                         )
-                                                    zk_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "device_id_num": each.user_id,
-                                                            "attendance_type": str(
-                                                                each.status
-                                                            ),
-                                                            "punch_type": str(
-                                                                each.punch
-                                                            ),
-                                                            "punching_time": atten_time,
-                                                            "address_id": info.address_id.id,
-                                                        }
-                                                    )
                                         else:
                                             # No previous attendance, treat as check-in
                                             hr_attendance.create(
@@ -335,16 +299,18 @@ class BiometricDeviceDetails(models.Model):
                                                     "check_in": atten_time,
                                                 }
                                             )
-                                            zk_attendance.create(
-                                                {
-                                                    "employee_id": get_user_id.id,
-                                                    "device_id_num": each.user_id,
-                                                    "attendance_type": str(each.status),
-                                                    "punch_type": str(each.punch),
-                                                    "punching_time": atten_time,
-                                                    "address_id": info.address_id.id,
-                                                }
-                                            )
+
+                                        # Store the original punch in the database
+                                        zk_attendance.create(
+                                            {
+                                                "employee_id": get_user_id.id,
+                                                "device_id_num": each.user_id,
+                                                "attendance_type": str(each.status),
+                                                "punch_type": original_punch,
+                                                "punching_time": atten_time,
+                                                "address_id": info.address_id.id,
+                                            }
+                                        )
                                 else:
                                     # Create a new employee record if not found
                                     employee = self.env["hr.employee"].create(
@@ -353,18 +319,27 @@ class BiometricDeviceDetails(models.Model):
                                             "name": uid.name,
                                         }
                                     )
+
+                                    # Get the original punch type
+                                    original_punch = str(each.punch)
+                                    is_overtime_in = original_punch == "4"
+                                    is_overtime_out = original_punch == "5"
+
+                                    # For new employees, always create a check-in
                                     hr_attendance.create(
                                         {
                                             "employee_id": employee.id,
                                             "check_in": atten_time,
                                         }
                                     )
+
+                                    # Store the original punch in the database
                                     zk_attendance.create(
                                         {
                                             "employee_id": employee.id,
                                             "device_id_num": each.user_id,
                                             "attendance_type": str(each.status),
-                                            "punch_type": str(each.punch),
+                                            "punch_type": original_punch,
                                             "punching_time": atten_time,
                                             "address_id": info.address_id.id,
                                         }

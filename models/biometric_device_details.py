@@ -220,87 +220,7 @@ class BiometricDeviceDetails(models.Model):
                                         is_overtime_in = original_punch == "4"
                                         is_overtime_out = original_punch == "5"
 
-                                        # Find the last attendance record for this employee
-                                        last_attendance = hr_attendance.search(
-                                            [("employee_id", "=", get_user_id.id)],
-                                            order="check_in desc",
-                                            limit=1,
-                                        )
-
-                                        if last_attendance:
-                                            if not last_attendance.check_out:
-                                                # Last attendance is a check-in without check-out
-                                                if (
-                                                    original_punch == "0"
-                                                    or is_overtime_in
-                                                ):
-                                                    # Handle as check-in again (close previous and open new)
-                                                    last_attendance.write(
-                                                        {"check_out": atten_time}
-                                                    )
-                                                    hr_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "check_in": atten_time,
-                                                        }
-                                                    )
-                                                elif (
-                                                    original_punch == "1"
-                                                    or is_overtime_out
-                                                ):
-                                                    # Handle as check-out
-                                                    last_attendance.write(
-                                                        {"check_out": atten_time}
-                                                    )
-                                                # Handle other punch types (2,3) if needed
-                                            else:
-                                                # Last attendance is a complete check-in/check-out pair
-                                                if (
-                                                    original_punch == "0"
-                                                    or is_overtime_in
-                                                ):
-                                                    # Handle as check-in
-                                                    hr_attendance.create(
-                                                        {
-                                                            "employee_id": get_user_id.id,
-                                                            "check_in": atten_time,
-                                                        }
-                                                    )
-                                                elif (
-                                                    original_punch == "1"
-                                                    or is_overtime_out
-                                                ):
-                                                    # Check-out without prior check-in
-                                                    time_diff = (
-                                                        atten_time
-                                                        - last_attendance.check_out
-                                                    )
-                                                    if time_diff.total_seconds() <= 180:
-                                                        # Treat as check-in and check-out pair
-                                                        hr_attendance.create(
-                                                            {
-                                                                "employee_id": get_user_id.id,
-                                                                "check_in": last_attendance.check_out,
-                                                                "check_out": atten_time,
-                                                            }
-                                                        )
-                                                    else:
-                                                        hr_attendance.create(
-                                                            {
-                                                                "employee_id": get_user_id.id,
-                                                                "check_in": atten_time,
-                                                            }
-                                                        )
-                                        else:
-                                            # No previous attendance, treat as check-in
-                                            hr_attendance.create(
-                                                {
-                                                    "employee_id": get_user_id.id,
-                                                    "check_in": atten_time,
-                                                }
-                                            )
-
-                                        # Store the original punch in the database
+                                        # Always store the original punch in the zk_attendance table
                                         zk_attendance.create(
                                             {
                                                 "employee_id": get_user_id.id,
@@ -311,6 +231,128 @@ class BiometricDeviceDetails(models.Model):
                                                 "address_id": info.address_id.id,
                                             }
                                         )
+
+                                        # Find if there's an open attendance record
+                                        open_attendance = hr_attendance.search(
+                                            [
+                                                ("employee_id", "=", get_user_id.id),
+                                                ("check_out", "=", False),
+                                            ],
+                                            limit=1,
+                                        )
+
+                                        # Handle check-in (original or overtime)
+                                        if original_punch == "0" or is_overtime_in:
+                                            if open_attendance:
+                                                # If there's an open attendance, close it first
+                                                open_attendance.write(
+                                                    {"check_out": atten_time}
+                                                )
+                                                # Then create a new check-in
+                                                try:
+                                                    hr_attendance.create(
+                                                        {
+                                                            "employee_id": get_user_id.id,
+                                                            "check_in": atten_time,
+                                                        }
+                                                    )
+                                                except Exception as e:
+                                                    _logger.error(
+                                                        f"Error creating attendance: {e}"
+                                                    )
+                                            else:
+                                                # No open attendance, simply create a new check-in
+                                                try:
+                                                    hr_attendance.create(
+                                                        {
+                                                            "employee_id": get_user_id.id,
+                                                            "check_in": atten_time,
+                                                        }
+                                                    )
+                                                except Exception as e:
+                                                    _logger.error(
+                                                        f"Error creating attendance: {e}"
+                                                    )
+
+                                        # Handle check-out (original or overtime)
+                                        elif original_punch == "1" or is_overtime_out:
+                                            if open_attendance:
+                                                # If there's an open attendance, close it
+                                                open_attendance.write(
+                                                    {"check_out": atten_time}
+                                                )
+                                            else:
+                                                # No open attendance to close
+                                                # Find the last attendance record
+                                                last_attendance = hr_attendance.search(
+                                                    [
+                                                        (
+                                                            "employee_id",
+                                                            "=",
+                                                            get_user_id.id,
+                                                        )
+                                                    ],
+                                                    order="check_in desc",
+                                                    limit=1,
+                                                )
+
+                                                if last_attendance:
+                                                    # Check if the last check-out was recent (within 3 minutes)
+                                                    time_diff = (
+                                                        atten_time
+                                                        - last_attendance.check_out
+                                                        if last_attendance.check_out
+                                                        else datetime.timedelta(
+                                                            hours=24
+                                                        )
+                                                    )
+
+                                                    if time_diff.total_seconds() <= 180:
+                                                        # Create a short attendance span
+                                                        try:
+                                                            hr_attendance.create(
+                                                                {
+                                                                    "employee_id": get_user_id.id,
+                                                                    "check_in": last_attendance.check_out
+                                                                    or (
+                                                                        atten_time
+                                                                        - datetime.timedelta(
+                                                                            minutes=1
+                                                                        )
+                                                                    ),
+                                                                    "check_out": atten_time,
+                                                                }
+                                                            )
+                                                        except Exception as e:
+                                                            _logger.error(
+                                                                f"Error creating attendance: {e}"
+                                                            )
+                                                    else:
+                                                        # Create a new check-in instead
+                                                        try:
+                                                            hr_attendance.create(
+                                                                {
+                                                                    "employee_id": get_user_id.id,
+                                                                    "check_in": atten_time,
+                                                                }
+                                                            )
+                                                        except Exception as e:
+                                                            _logger.error(
+                                                                f"Error creating attendance: {e}"
+                                                            )
+                                                else:
+                                                    # No previous attendance at all, create a check-in
+                                                    try:
+                                                        hr_attendance.create(
+                                                            {
+                                                                "employee_id": get_user_id.id,
+                                                                "check_in": atten_time,
+                                                            }
+                                                        )
+                                                    except Exception as e:
+                                                        _logger.error(
+                                                            f"Error creating attendance: {e}"
+                                                        )
                                 else:
                                     # Create a new employee record if not found
                                     employee = self.env["hr.employee"].create(
@@ -320,30 +362,28 @@ class BiometricDeviceDetails(models.Model):
                                         }
                                     )
 
-                                    # Get the original punch type
-                                    original_punch = str(each.punch)
-                                    is_overtime_in = original_punch == "4"
-                                    is_overtime_out = original_punch == "5"
-
-                                    # For new employees, always create a check-in
-                                    hr_attendance.create(
-                                        {
-                                            "employee_id": employee.id,
-                                            "check_in": atten_time,
-                                        }
-                                    )
-
                                     # Store the original punch in the database
                                     zk_attendance.create(
                                         {
                                             "employee_id": employee.id,
                                             "device_id_num": each.user_id,
                                             "attendance_type": str(each.status),
-                                            "punch_type": original_punch,
+                                            "punch_type": str(each.punch),
                                             "punching_time": atten_time,
                                             "address_id": info.address_id.id,
                                         }
                                     )
+
+                                    # For new employees, always create a check-in
+                                    try:
+                                        hr_attendance.create(
+                                            {
+                                                "employee_id": employee.id,
+                                                "check_in": atten_time,
+                                            }
+                                        )
+                                    except Exception as e:
+                                        _logger.error(f"Error creating attendance: {e}")
                     conn.disconnect
                     return True
                 else:

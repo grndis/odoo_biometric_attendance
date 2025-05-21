@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <menuitem id="biometric_device_details_menu"
+              name="Biometric Devices"
+              action="biometric_device_details_action"
+              parent="hr_attendance.menu_hr_attendance_root"
+              sequence="22"/>
+
+    <menuitem id="daily_attendance_menu"
+              name="Biometric Logs"
+              action="daily_attendance_action"
+              parent="hr_attendance.menu_hr_attendance_root"
+              groups="hr_attendance.group_hr_attendance_officer"
+              sequence="23"/>
+</odoo>
+

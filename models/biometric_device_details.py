@@ -160,11 +160,18 @@ class BiometricDeviceDetails(models.Model):
         for machine in machines:
             machine.action_download_attendance()
 
+    ### Action Download Attendance
     def action_download_attendance(self):
         """Function to download attendance records from the device"""
         _logger.info("++++++++++++Cron Executed++++++++++++++++++++++")
         zk_attendance = self.env["zk.machine.attendance"]
         hr_attendance = self.env["hr.attendance"]
+
+        # Get the model that has the constraint (if it exists)
+        overtime_model = False
+        if "hr.attendance.overtime" in self.env:
+            overtime_model = self.env["hr.attendance.overtime"]
+
         for info in self:
             machine_ip = info.device_ip
             zk_port = info.port_number
@@ -192,6 +199,10 @@ class BiometricDeviceDetails(models.Model):
                 user = conn.get_users()
                 attendance = conn.get_attendance()
                 if attendance:
+                    # First, disable any automatic overtime creation that might be triggered
+                    # by setting a context flag
+                    self = self.with_context(no_overtime_creation=True)
+
                     for each in attendance:
                         atten_time = each.timestamp
                         local_tz = pytz.timezone(self.env.user.partner_id.tz or "GMT")
@@ -208,6 +219,30 @@ class BiometricDeviceDetails(models.Model):
                                     [("device_id_num", "=", each.user_id)]
                                 )
                                 if get_user_id:
+                                    # Check for existing overtime records and delete them if they exist
+                                    if overtime_model:
+                                        try:
+                                            # Find and delete any overtime records for this employee today
+                                            overtime_records = overtime_model.search(
+                                                [
+                                                    (
+                                                        "employee_id",
+                                                        "=",
+                                                        get_user_id.id,
+                                                    ),
+                                                    ("date", "=", atten_time.date()),
+                                                ]
+                                            )
+                                            if overtime_records:
+                                                overtime_records.unlink()
+                                                _logger.info(
+                                                    f"Deleted overtime records for employee {get_user_id.name} on {atten_time.date()}"
+                                                )
+                                        except Exception as e:
+                                            _logger.error(
+                                                f"Error handling overtime records: {e}"
+                                            )
+
                                     duplicate_atten_ids = zk_attendance.search(
                                         [
                                             ("device_id_num", "=", each.user_id),
@@ -245,12 +280,14 @@ class BiometricDeviceDetails(models.Model):
                                         if original_punch == "0" or is_overtime_in:
                                             if open_attendance:
                                                 # If there's an open attendance, close it first
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
+                                                open_attendance.with_context(
+                                                    no_overtime_creation=True
+                                                ).write({"check_out": atten_time})
                                                 # Then create a new check-in
                                                 try:
-                                                    hr_attendance.create(
+                                                    hr_attendance.with_context(
+                                                        no_overtime_creation=True
+                                                    ).create(
                                                         {
                                                             "employee_id": get_user_id.id,
                                                             "check_in": atten_time,
@@ -263,7 +300,9 @@ class BiometricDeviceDetails(models.Model):
                                             else:
                                                 # No open attendance, simply create a new check-in
                                                 try:
-                                                    hr_attendance.create(
+                                                    hr_attendance.with_context(
+                                                        no_overtime_creation=True
+                                                    ).create(
                                                         {
                                                             "employee_id": get_user_id.id,
                                                             "check_in": atten_time,
@@ -278,9 +317,9 @@ class BiometricDeviceDetails(models.Model):
                                         elif original_punch == "1" or is_overtime_out:
                                             if open_attendance:
                                                 # If there's an open attendance, close it
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
+                                                open_attendance.with_context(
+                                                    no_overtime_creation=True
+                                                ).write({"check_out": atten_time})
                                             else:
                                                 # No open attendance to close
                                                 # Find the last attendance record
@@ -310,7 +349,9 @@ class BiometricDeviceDetails(models.Model):
                                                     if time_diff.total_seconds() <= 180:
                                                         # Create a short attendance span
                                                         try:
-                                                            hr_attendance.create(
+                                                            hr_attendance.with_context(
+                                                                no_overtime_creation=True
+                                                            ).create(
                                                                 {
                                                                     "employee_id": get_user_id.id,
                                                                     "check_in": last_attendance.check_out
@@ -330,7 +371,9 @@ class BiometricDeviceDetails(models.Model):
                                                     else:
                                                         # Create a new check-in instead
                                                         try:
-                                                            hr_attendance.create(
+                                                            hr_attendance.with_context(
+                                                                no_overtime_creation=True
+                                                            ).create(
                                                                 {
                                                                     "employee_id": get_user_id.id,
                                                                     "check_in": atten_time,
@@ -343,7 +386,9 @@ class BiometricDeviceDetails(models.Model):
                                                 else:
                                                     # No previous attendance at all, create a check-in
                                                     try:
-                                                        hr_attendance.create(
+                                                        hr_attendance.with_context(
+                                                            no_overtime_creation=True
+                                                        ).create(
                                                             {
                                                                 "employee_id": get_user_id.id,
                                                                 "check_in": atten_time,
@@ -376,7 +421,9 @@ class BiometricDeviceDetails(models.Model):
 
                                     # For new employees, always create a check-in
                                     try:
-                                        hr_attendance.create(
+                                        hr_attendance.with_context(
+                                            no_overtime_creation=True
+                                        ).create(
                                             {
                                                 "employee_id": employee.id,
                                                 "check_in": atten_time,
@@ -398,6 +445,7 @@ class BiometricDeviceDetails(models.Model):
                     )
                 )
 
+    ### Action restart device
     def action_restart_device(self):
         """For restarting the device"""
         zk = ZK(

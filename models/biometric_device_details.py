@@ -164,13 +164,16 @@ class BiometricDeviceDetails(models.Model):
     def action_download_attendance(self):
         """Function to download attendance records from the device"""
         _logger.info("++++++++++++Cron Executed++++++++++++++++++++++")
-        zk_attendance = self.env["zk.machine.attendance"]
-        hr_attendance = self.env["hr.attendance"]
+
+        # Process in smaller batches to avoid long transactions
+        max_records_per_batch = 50
+
         for info in self:
             machine_ip = info.device_ip
             zk_port = info.port_number
+
+            # Connect to the device
             try:
-                # Connecting with the device with the ip and port provided
                 zk = ZK(
                     machine_ip,
                     port=zk_port,
@@ -186,223 +189,245 @@ class BiometricDeviceDetails(models.Model):
                         "with 'pip3 install pyzk'."
                     )
                 )
+
             conn = self.device_connect(zk)
-            self.action_set_timezone()
-            if conn:
-                conn.disable_device()  # Device Cannot be used during this time.
-                user = conn.get_users()
-                attendance = conn.get_attendance()
-                if attendance:
-                    for each in attendance:
-                        atten_time = each.timestamp
-                        local_tz = pytz.timezone(self.env.user.partner_id.tz or "GMT")
-                        local_dt = local_tz.localize(atten_time, is_dst=None)
-                        utc_dt = local_dt.astimezone(pytz.utc)
-                        utc_dt = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
-                        atten_time = datetime.datetime.strptime(
-                            utc_dt, "%Y-%m-%d %H:%M:%S"
-                        )
-
-                        for uid in user:
-                            if uid.user_id == each.user_id:
-                                get_user_id = self.env["hr.employee"].search(
-                                    [("device_id_num", "=", each.user_id)]
-                                )
-                                if get_user_id:
-                                    duplicate_atten_ids = zk_attendance.search(
-                                        [
-                                            ("device_id_num", "=", each.user_id),
-                                            ("punching_time", "=", atten_time),
-                                        ]
-                                    )
-                                    if not duplicate_atten_ids:
-                                        # Get the original punch type and map overtime to regular punches
-                                        original_punch = str(each.punch)
-                                        effective_punch = original_punch
-
-                                        # Map overtime punches to regular punches
-                                        if original_punch == "4":  # Overtime In
-                                            effective_punch = "0"  # Map to Check In
-                                        elif original_punch == "5":  # Overtime Out
-                                            effective_punch = "1"  # Map to Check Out
-
-                                        # Store the original punch in the zk_attendance table
-                                        zk_attendance.create(
-                                            {
-                                                "employee_id": get_user_id.id,
-                                                "device_id_num": each.user_id,
-                                                "attendance_type": str(each.status),
-                                                "punch_type": original_punch,
-                                                "punching_time": atten_time,
-                                                "address_id": info.address_id.id,
-                                            }
-                                        )
-
-                                        # Process based on the effective punch type
-                                        if (
-                                            effective_punch == "0"
-                                        ):  # Check In (including mapped Overtime In)
-                                            # Find if there's an open attendance record
-                                            open_attendance = hr_attendance.search(
-                                                [
-                                                    (
-                                                        "employee_id",
-                                                        "=",
-                                                        get_user_id.id,
-                                                    ),
-                                                    ("check_out", "=", False),
-                                                ],
-                                                limit=1,
-                                            )
-
-                                            if open_attendance:
-                                                # If there's an open attendance, close it first
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
-
-                                            # Create a new check-in
-                                            try:
-                                                hr_attendance.create(
-                                                    {
-                                                        "employee_id": get_user_id.id,
-                                                        "check_in": atten_time,
-                                                    }
-                                                )
-                                            except Exception as e:
-                                                _logger.error(
-                                                    f"Error creating attendance: {e}"
-                                                )
-
-                                        elif (
-                                            effective_punch == "1"
-                                        ):  # Check Out (including mapped Overtime Out)
-                                            # Find if there's an open attendance record
-                                            open_attendance = hr_attendance.search(
-                                                [
-                                                    (
-                                                        "employee_id",
-                                                        "=",
-                                                        get_user_id.id,
-                                                    ),
-                                                    ("check_out", "=", False),
-                                                ],
-                                                limit=1,
-                                            )
-
-                                            if open_attendance:
-                                                # If there's an open attendance, close it
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
-                                            else:
-                                                # No open attendance to close
-                                                # Find the last attendance record
-                                                last_attendance = hr_attendance.search(
-                                                    [
-                                                        (
-                                                            "employee_id",
-                                                            "=",
-                                                            get_user_id.id,
-                                                        )
-                                                    ],
-                                                    order="check_in desc",
-                                                    limit=1,
-                                                )
-
-                                                if (
-                                                    last_attendance
-                                                    and last_attendance.check_out
-                                                ):
-                                                    # Check if the last check-out was recent (within 3 minutes)
-                                                    time_diff = (
-                                                        atten_time
-                                                        - last_attendance.check_out
-                                                    )
-
-                                                    if time_diff.total_seconds() <= 180:
-                                                        # Create a short attendance span
-                                                        try:
-                                                            hr_attendance.create(
-                                                                {
-                                                                    "employee_id": get_user_id.id,
-                                                                    "check_in": last_attendance.check_out,
-                                                                    "check_out": atten_time,
-                                                                }
-                                                            )
-                                                        except Exception as e:
-                                                            _logger.error(
-                                                                f"Error creating attendance: {e}"
-                                                            )
-                                                    else:
-                                                        # Create a new check-in instead
-                                                        try:
-                                                            hr_attendance.create(
-                                                                {
-                                                                    "employee_id": get_user_id.id,
-                                                                    "check_in": atten_time,
-                                                                }
-                                                            )
-                                                        except Exception as e:
-                                                            _logger.error(
-                                                                f"Error creating attendance: {e}"
-                                                            )
-                                                else:
-                                                    # No previous attendance with check-out, create a check-in
-                                                    try:
-                                                        hr_attendance.create(
-                                                            {
-                                                                "employee_id": get_user_id.id,
-                                                                "check_in": atten_time,
-                                                            }
-                                                        )
-                                                    except Exception as e:
-                                                        _logger.error(
-                                                            f"Error creating attendance: {e}"
-                                                        )
-                                else:
-                                    # Create a new employee record if not found
-                                    employee = self.env["hr.employee"].create(
-                                        {
-                                            "device_id_num": each.user_id,
-                                            "name": uid.name,
-                                        }
-                                    )
-
-                                    # Store the original punch in the database
-                                    zk_attendance.create(
-                                        {
-                                            "employee_id": employee.id,
-                                            "device_id_num": each.user_id,
-                                            "attendance_type": str(each.status),
-                                            "punch_type": str(each.punch),
-                                            "punching_time": atten_time,
-                                            "address_id": info.address_id.id,
-                                        }
-                                    )
-
-                                    # For new employees, always create a check-in
-                                    try:
-                                        hr_attendance.create(
-                                            {
-                                                "employee_id": employee.id,
-                                                "check_in": atten_time,
-                                            }
-                                        )
-                                    except Exception as e:
-                                        _logger.error(f"Error creating attendance: {e}")
-                    conn.disconnect
-                    return True
-                else:
-                    raise UserError(
-                        _("Unable to get the attendance log, please" "try again later.")
-                    )
-            else:
+            if not conn:
                 raise UserError(
                     _(
                         "Unable to connect, please check the"
                         "parameters and network connections."
                     )
+                )
+
+            try:
+                # Set timezone
+                self.action_set_timezone()
+
+                # Disable device during download
+                conn.disable_device()
+
+                # Get users and attendance
+                user = conn.get_users()
+                attendance = conn.get_attendance()
+
+                if not attendance:
+                    conn.enable_device()
+                    conn.disconnect()
+                    raise UserError(
+                        _("Unable to get the attendance log, please try again later.")
+                    )
+
+                # Process attendance in batches
+                total_records = len(attendance)
+                _logger.info(f"Found {total_records} attendance records to process")
+
+                for i in range(0, total_records, max_records_per_batch):
+                    # Create a new cursor for each batch to avoid long transactions
+                    with self.env.cr.savepoint():
+                        batch = attendance[i : i + max_records_per_batch]
+                        _logger.info(
+                            f"Processing batch {i//max_records_per_batch + 1} with {len(batch)} records"
+                        )
+
+                        self._process_attendance_batch(batch, user, info)
+
+                # Enable device and disconnect
+                conn.enable_device()
+                conn.disconnect()
+
+                return {
+                    "type": "ir.actions.client",
+                    "tag": "display_notification",
+                    "params": {
+                        "message": f"Successfully processed {total_records} attendance records",
+                        "type": "success",
+                        "sticky": False,
+                    },
+                }
+
+            except Exception as e:
+                _logger.error(f"Error in download_attendance: {e}")
+                # Make sure to enable the device and disconnect even if there's an error
+                try:
+                    if conn:
+                        conn.enable_device()
+                        conn.disconnect()
+                except Exception:
+                    pass
+
+                raise UserError(_(f"Error processing attendance: {e}"))
+
+        def _process_attendance_batch(self, batch, user, info):
+            """Process a batch of attendance records"""
+            zk_attendance = self.env["zk.machine.attendance"]
+            hr_attendance = self.env["hr.attendance"]
+
+            for each in batch:
+                try:
+                    # Convert timestamp to UTC
+                    atten_time = each.timestamp
+                    local_tz = pytz.timezone(self.env.user.partner_id.tz or "GMT")
+                    local_dt = local_tz.localize(atten_time, is_dst=None)
+                    utc_dt = local_dt.astimezone(pytz.utc)
+                    utc_dt = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    atten_time = datetime.datetime.strptime(utc_dt, "%Y-%m-%d %H:%M:%S")
+
+                    # Find the user
+                    user_found = False
+                    for uid in user:
+                        if uid.user_id == each.user_id:
+                            user_found = True
+                            get_user_id = self.env["hr.employee"].search(
+                                [("device_id_num", "=", each.user_id)]
+                            )
+
+                            if not get_user_id:
+                                # Create new employee if not found
+                                get_user_id = self.env["hr.employee"].create(
+                                    {
+                                        "device_id_num": each.user_id,
+                                        "name": uid.name,
+                                    }
+                                )
+
+                            # Check for duplicate attendance
+                            duplicate_atten_ids = zk_attendance.search(
+                                [
+                                    ("device_id_num", "=", each.user_id),
+                                    ("punching_time", "=", atten_time),
+                                ]
+                            )
+
+                            if duplicate_atten_ids:
+                                _logger.info(
+                                    f"Skipping duplicate attendance for {each.user_id} at {atten_time}"
+                                )
+                                continue
+
+                            # Map punch types
+                            original_punch = str(each.punch)
+                            effective_punch = original_punch
+
+                            # Map overtime punches to regular punches
+                            if original_punch == "4":  # Overtime In
+                                effective_punch = "0"  # Map to Check In
+                            elif original_punch == "5":  # Overtime Out
+                                effective_punch = "1"  # Map to Check Out
+
+                            # Create zk_attendance record
+                            zk_attendance.create(
+                                {
+                                    "employee_id": get_user_id.id,
+                                    "device_id_num": each.user_id,
+                                    "attendance_type": str(each.status),
+                                    "punch_type": original_punch,
+                                    "punching_time": atten_time,
+                                    "address_id": info.address_id.id,
+                                }
+                            )
+
+                            # Process based on effective punch type
+                            if effective_punch == "0":  # Check In
+                                self._process_check_in(
+                                    hr_attendance, get_user_id, atten_time
+                                )
+                            elif effective_punch == "1":  # Check Out
+                                self._process_check_out(
+                                    hr_attendance, get_user_id, atten_time
+                                )
+
+                            break  # Found the user, no need to continue the loop
+
+                    if not user_found:
+                        _logger.warning(
+                            f"User ID {each.user_id} not found in device users"
+                        )
+
+                except Exception as e:
+                    _logger.error(f"Error processing attendance record: {e}")
+                    # Continue with next record instead of failing the entire batch
+                    continue
+
+        def _process_check_in(self, hr_attendance, employee, atten_time):
+            """Process a check-in punch"""
+            try:
+                # Find if there's an open attendance record
+                open_attendance = hr_attendance.search(
+                    [("employee_id", "=", employee.id), ("check_out", "=", False)],
+                    limit=1,
+                )
+
+                if open_attendance:
+                    # If there's an open attendance, close it first
+                    open_attendance.write({"check_out": atten_time})
+
+                # Create a new check-in
+                hr_attendance.create(
+                    {
+                        "employee_id": employee.id,
+                        "check_in": atten_time,
+                    }
+                )
+
+            except Exception as e:
+                _logger.error(
+                    f"Error processing check-in for employee {employee.name}: {e}"
+                )
+
+        def _process_check_out(self, hr_attendance, employee, atten_time):
+            """Process a check-out punch"""
+            try:
+                # Find if there's an open attendance record
+                open_attendance = hr_attendance.search(
+                    [("employee_id", "=", employee.id), ("check_out", "=", False)],
+                    limit=1,
+                )
+
+                if open_attendance:
+                    # If there's an open attendance, close it
+                    open_attendance.write({"check_out": atten_time})
+                else:
+                    # No open attendance to close
+                    # Find the last attendance record
+                    last_attendance = hr_attendance.search(
+                        [("employee_id", "=", employee.id)],
+                        order="check_in desc",
+                        limit=1,
+                    )
+
+                    if last_attendance and last_attendance.check_out:
+                        # Check if the last check-out was recent (within 3 minutes)
+                        time_diff = atten_time - last_attendance.check_out
+
+                        if time_diff.total_seconds() <= 180:
+                            # Create a short attendance span
+                            hr_attendance.create(
+                                {
+                                    "employee_id": employee.id,
+                                    "check_in": last_attendance.check_out,
+                                    "check_out": atten_time,
+                                }
+                            )
+                        else:
+                            # Create a new check-in instead
+                            hr_attendance.create(
+                                {
+                                    "employee_id": employee.id,
+                                    "check_in": atten_time,
+                                }
+                            )
+                    else:
+                        # No previous attendance with check-out, create a check-in
+                        hr_attendance.create(
+                            {
+                                "employee_id": employee.id,
+                                "check_in": atten_time,
+                            }
+                        )
+
+            except Exception as e:
+                _logger.error(
+                    f"Error processing check-out for employee {employee.name}: {e}"
                 )
 
     ### Action restart device

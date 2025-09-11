@@ -13,6 +13,16 @@ class ZkMachineAttendance(models.Model):
         """Overriding the __check_validity function for employee attendance."""
         pass
 
+    @api.model
+    def create(self, vals):
+        """Bypass hr.attendance.create validations when storing raw punches.
+
+        This model inherits hr.attendance fields for convenience, but raw
+        log storage must not trigger hr.attendance business rules. Calling the
+        base Model.create avoids parent create() logic and validations.
+        """
+        return models.Model.create(self, vals)
+
     device_id_num = fields.Char(string='Biometric Device ID',
                                 help="The ID of the Biometric Device")
     punch_type = fields.Selection([('0', 'Check In'), ('1', 'Check Out'),

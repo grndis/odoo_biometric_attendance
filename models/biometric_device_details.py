@@ -165,7 +165,8 @@ class BiometricDeviceDetails(models.Model):
         """Function to download attendance records from the device"""
         _logger.info("++++++++++++Cron Executed++++++++++++++++++++++")
         zk_attendance = self.env["zk.machine.attendance"]
-        hr_attendance = self.env["hr.attendance"]
+        # Use sudo and context flag to avoid overtime creation and rule issues
+        hr_attendance = self.env["hr.attendance"].sudo().with_context(no_overtime_creation=True)
         for info in self:
             machine_ip = info.device_ip
             zk_port = info.port_number
@@ -193,6 +194,12 @@ class BiometricDeviceDetails(models.Model):
                 user = conn.get_users()
                 attendance = conn.get_attendance()
                 if attendance:
+                    # Ensure chronological processing to maintain validity
+                    try:
+                        attendance = sorted(attendance, key=lambda a: a.timestamp)
+                    except Exception:
+                        # If sorting fails for any reason, proceed as-is
+                        pass
                     processed_count = 0
                     for each in attendance:
                         atten_time = each.timestamp
@@ -241,34 +248,53 @@ class BiometricDeviceDetails(models.Model):
                                         )
 
                                         # Process based on the effective punch type
-                                        if (
-                                            effective_punch == "0"
-                                        ):  # Check In (including mapped Overtime In)
-                                            # Find if there's an open attendance record
+                                        if effective_punch == "0":
+                                            # Check In (including mapped Overtime In)
+                                            # If an open attendance exists, close it first (safely)
                                             open_attendance = hr_attendance.search(
                                                 [
-                                                    (
-                                                        "employee_id",
-                                                        "=",
-                                                        get_user_id.id,
-                                                    ),
+                                                    ("employee_id", "=", get_user_id.id),
                                                     ("check_out", "=", False),
                                                 ],
                                                 limit=1,
                                             )
 
+                                            last_close_time = None
                                             if open_attendance:
-                                                # If there's an open attendance, close it first
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
+                                                close_time = atten_time
+                                                # Ensure strict validity: check_out must be > check_in
+                                                if close_time <= open_attendance.check_in:
+                                                    close_time = open_attendance.check_in + datetime.timedelta(seconds=1)
+                                                try:
+                                                    open_attendance.write({"check_out": close_time})
+                                                    last_close_time = close_time
+                                                except Exception as e:
+                                                    _logger.error(
+                                                        "Error closing open attendance for %s: %s",
+                                                        get_user_id.name,
+                                                        e,
+                                                    )
+
+                                            # Determine new check-in ensuring no overlap
+                                            new_check_in = atten_time
+                                            if last_close_time and new_check_in <= last_close_time:
+                                                new_check_in = last_close_time + datetime.timedelta(seconds=1)
+
+                                            # Also guard against overlap with previous last attendance
+                                            last_att = hr_attendance.search(
+                                                [("employee_id", "=", get_user_id.id)],
+                                                order="check_in desc",
+                                                limit=1,
+                                            )
+                                            if last_att and last_att.check_out and new_check_in <= last_att.check_out:
+                                                new_check_in = last_att.check_out + datetime.timedelta(seconds=1)
 
                                             # Create a new check-in
                                             try:
                                                 hr_attendance.create(
                                                     {
                                                         "employee_id": get_user_id.id,
-                                                        "check_in": atten_time,
+                                                        "check_in": new_check_in,
                                                     }
                                                 )
                                                 processed_count += 1
@@ -277,35 +303,45 @@ class BiometricDeviceDetails(models.Model):
                                                     f"Error creating attendance: {e}"
                                                 )
 
-                                        elif (
-                                            effective_punch == "1"
-                                        ):  # Check Out (including mapped Overtime Out)
-                                            # Find if there's an open attendance record
+                                        elif effective_punch == "1":
+                                            # Check Out (including mapped Overtime Out)
                                             open_attendance = hr_attendance.search(
                                                 [
-                                                    (
-                                                        "employee_id",
-                                                        "=",
-                                                        get_user_id.id,
-                                                    ),
+                                                    ("employee_id", "=", get_user_id.id),
                                                     ("check_out", "=", False),
                                                 ],
                                                 limit=1,
                                             )
 
                                             if open_attendance:
-                                                # If there's an open attendance, close it
-                                                open_attendance.write(
-                                                    {"check_out": atten_time}
-                                                )
-                                                processed_count += 1
+                                                close_time = atten_time
+                                                if close_time <= open_attendance.check_in:
+                                                    close_time = open_attendance.check_in + datetime.timedelta(seconds=1)
+                                                try:
+                                                    open_attendance.write({"check_out": close_time})
+                                                    processed_count += 1
+                                                except Exception as e:
+                                                    _logger.error(
+                                                        "Error closing attendance for %s: %s",
+                                                        get_user_id.name,
+                                                        e,
+                                                    )
                                             else:
-                                                # No open attendance to close, create a check-in
+                                                # No open attendance to close, create a check-in (toggle behavior)
+                                                new_check_in = atten_time
+                                                last_att = hr_attendance.search(
+                                                    [("employee_id", "=", get_user_id.id)],
+                                                    order="check_in desc",
+                                                    limit=1,
+                                                )
+                                                if last_att and last_att.check_out and new_check_in <= last_att.check_out:
+                                                    new_check_in = last_att.check_out + datetime.timedelta(seconds=1)
+
                                                 try:
                                                     hr_attendance.create(
                                                         {
                                                             "employee_id": get_user_id.id,
-                                                            "check_in": atten_time,
+                                                            "check_in": new_check_in,
                                                         }
                                                     )
                                                     processed_count += 1

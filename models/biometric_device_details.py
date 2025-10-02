@@ -154,11 +154,12 @@ class BiometricDeviceDetails(models.Model):
             except Exception as error:
                 raise ValidationError(f"{error}")
 
-    @api.model
-    def cron_download(self):
-        machines = self.env["biometric.device.details"].search([])
-        for machine in machines:
-            machine.action_download_attendance()
+    # @api.model
+    # def cron_download(self):
+    #     """Cron functionality removed - using custom script instead"""
+    #     machines = self.env["biometric.device.details"].search([])
+    #     for machine in machines:
+    #         machine.action_download_attendance()
 
     ### Action Download Attendance
     def action_download_attendance(self):

@@ -21,7 +21,6 @@
         "views/hr_employee_views.xml",
         "views/daily_attendance_views.xml",
         "views/biometric_device_attendance_menus.xml",
-        "data/download_data.xml",
     ],
     "images": ["static/description/banner.png"],
     "license": "AGPL-3",

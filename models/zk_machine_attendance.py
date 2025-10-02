@@ -23,6 +23,29 @@ class ZkMachineAttendance(models.Model):
         for record in self:
             record.overtime_hours = 0.0
 
+    @api.depends('check_in', 'check_out')
+    def _compute_validated_overtime_hours(self):
+        """Override validated overtime computation to avoid model mixing issues.
+
+        zk.machine.attendance records are raw data storage and should not
+        compute validated overtime hours like regular hr.attendance records.
+        """
+        for record in self:
+            record.validated_overtime_hours = 0.0
+
+    def __getattr__(self, name):
+        """Catch-all method to prevent AttributeError for missing compute methods.
+
+        This ensures that any future compute methods added to hr.attendance
+        won't cause issues when called on zk.machine.attendance records.
+        """
+        if name.startswith('_compute_') and callable(getattr(super(), name, None)):
+            # Return a dummy method that does nothing
+            def dummy_compute(*args, **kwargs):
+                pass
+            return dummy_compute
+        return super().__getattr__(name)
+
     @api.model
     def create(self, vals):
         """Bypass hr.attendance.create validations when storing raw punches.

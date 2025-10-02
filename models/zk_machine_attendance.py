@@ -13,6 +13,16 @@ class ZkMachineAttendance(models.Model):
         """Overriding the __check_validity function for employee attendance."""
         pass
 
+    @api.depends('check_in', 'check_out')
+    def _compute_overtime_hours(self):
+        """Override overtime computation to avoid model mixing issues.
+
+        zk.machine.attendance records are raw data storage and should not
+        compute overtime hours like regular hr.attendance records.
+        """
+        for record in self:
+            record.overtime_hours = 0.0
+
     @api.model
     def create(self, vals):
         """Bypass hr.attendance.create validations when storing raw punches.
